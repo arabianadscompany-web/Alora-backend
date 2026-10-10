@@ -1,0 +1,3 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { getAdminClient, requireRole } from '@/lib/auth/server';
+export async function GET(req: NextRequest){try{await requireRole(req,['admin']); const db=getAdminClient(); const {data,error}=await db.from('products').select('*, sellers(id,business_name,status), product_variants(*)').eq('approval_status','PENDING').order('created_at',{ascending:true}).limit(100); if(error)throw error; return NextResponse.json({products:data});}catch(e:any){const s=e?.message==='UNAUTHENTICATED'?401:e?.message==='FORBIDDEN'?403:500;return NextResponse.json({error:s===500?'Could not load pending products':e.message},{status:s});}}
