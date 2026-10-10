@@ -1,0 +1,3 @@
+import { NextRequest,NextResponse } from 'next/server';
+import { getAdminClient,requireRole } from '@/lib/auth/server';
+export async function POST(req:NextRequest,{params}:{params:{id:string}}){try{await requireRole(req,['admin']);const db=getAdminClient();const {data,error}=await db.from('sellers').update({status:'SUSPENDED',updated_at:new Date().toISOString()}).eq('id',params.id).eq('status','PENDING').select('id,status').single();if(error||!data)return NextResponse.json({error:'Pending seller not found'},{status:404});return NextResponse.json({seller:data});}catch(e:any){const s=e?.message==='UNAUTHENTICATED'?401:e?.message==='FORBIDDEN'?403:500;return NextResponse.json({error:s===500?'Seller rejection failed':e.message},{status:s});}}
