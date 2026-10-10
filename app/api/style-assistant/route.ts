@@ -1,0 +1,31 @@
+import { NextRequest,NextResponse } from 'next/server';
+import {getAdminClient} from '@/lib/auth/server';
+
+interface Answers { occasion:string;colorMood:string;fit:string;budget:string;vibe:string;height?:number;weight?:number;bodyShape?:string;skinUndertone?:string;favoriteColors?:string[];skinType?:string;skinConcerns?:string[];hairType?:string;hairConcerns?:string[]; }
+const LABELS:any={occasion:{casual:'Everyday Casual',office:'Work & Office',evening:'Evening Glam',romantic:'Romantic Date'},colorMood:{pink:'Soft Blush & Pink',gold:'Gold & Neutral',deep:'Bold & Deep Tones',classic:'Classic Black & White'},fit:{flowy:'Flowy & Relaxed',fitted:'Fitted & Sleek',oversized:'Oversized & Comfy',structured:'Structured & Tailored'},budget:{budgetLow:'Under 500 EGP',budgetMid:'500–1,500 EGP',budgetHigh:'1,500–3,000 EGP',budgetAny:'No limit'},vibe:{newIn:'New In Trendsetter',dailyChic:'Daily Chic',softRomance:'Soft Romance',bestSellers:'Best Sellers Fan'}};
+
+export async function POST(req:NextRequest){
+  try{
+    const authHeader=req.headers.get('authorization'); let authUserId:string|null=null; if(authHeader?.startsWith('Bearer ')){ const {data}=await getAdminClient().auth.getUser(authHeader.slice(7)); authUserId=data.user?.id??null; } const body=await req.json(); const answers:Answers=body?.answers;
+    if(!answers||!answers.occasion||!answers.colorMood||!answers.fit||!answers.budget||!answers.vibe)return NextResponse.json({error:'Missing required quiz answers'},{status:400});
+    const db=getAdminClient();
+    const {data:products,error}=await db.from('products').select('id,title,description,base_price_cents,currency,category_id,product_variants(id,sku,size,color_name,stock_quantity,reserved_quantity,price_override_cents),product_ai_tags(*)').eq('approval_status','APPROVED').eq('is_active',true).limit(200);
+    if(error)throw error;
+    const catalog=(products??[]).flatMap((p:any)=>{const tags=p.product_ai_tags?.[0]??{};return (p.product_variants??[]).filter((v:any)=>v.stock_quantity-v.reserved_quantity>0).map((v:any)=>({productId:p.id,variantId:v.id,title:p.title,description:p.description??'',priceCents:Number(v.price_override_cents??p.base_price_cents),size:v.size,color:v.color_name,categoryId:p.category_id,tags:{bodyShapeFit:tags.body_shape_fit??[],colorToneFit:tags.color_tone_fit??[],skinTypeTarget:tags.skin_type_target??[],skinConcernsSolved:tags.skin_concerns_solved??[],hairConcernsSolved:tags.hair_concerns_solved??[],activeIngredients:tags.active_ingredients??[]}}));});
+    if(!catalog.length)return NextResponse.json({error:'No approved products are currently in stock'},{status:503});
+    const apiKey=process.env.OPENAI_API_KEY;if(!apiKey)return NextResponse.json({error:'AI service is not configured'},{status:503});
+    const model=process.env.OPENAI_STYLE_MODEL??'gpt-4o-mini';
+    const prompt=`Customer profile:\n${JSON.stringify(answers)}\n\nCatalog variants (recommend ONLY exact variantId/productId values):\n${JSON.stringify(catalog)}\n\nReturn JSON: {"styleSummary":string,"recommendations":[{"productId":string,"variantId":string,"reason":string}],"outfit":{"topVariantId":string|null,"bottomVariantId":string|null,"dressVariantId":string|null,"accessoryVariantIds":string[],"justification":string},"beautyRoutine":{"products":[{"variantId":string,"step":string,"reason":string,"activeIngredients":string[]}],"hairProducts":[{"variantId":string,"step":string,"reason":string}]}}. Never invent ids. Use only in-stock variants. If no suitable beauty/hair products exist, return empty arrays.`;
+    const res=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${apiKey}`},body:JSON.stringify({model,response_format:{type:'json_object'},temperature:.25,messages:[{role:'system',content:'You are ALORA Personal Stylist. Be precise, catalog-grounded and concise. Never invent products or ids.'},{role:'user',content:prompt}]})});
+    if(!res.ok)throw new Error('AI provider request failed'); const completion:any=await res.json(); const raw=completion?.choices?.[0]?.message?.content;if(!raw)throw new Error('AI returned no content'); let parsed:any;try{parsed=JSON.parse(raw)}catch{throw new Error('AI returned invalid JSON')}
+    const allowed=new Map(catalog.map((x:any)=>[x.variantId,x])); const recommendations=Array.isArray(parsed.recommendations)?parsed.recommendations.filter((r:any)=>allowed.has(r.variantId)&&allowed.has(r.variantId)).slice(0,5).map((r:any)=>({productId:allowed.get(r.variantId).productId,variantId:r.variantId,reason:String(r.reason??'').slice(0,300)})):[];
+    if(!recommendations.length)return NextResponse.json({error:'AI could not produce catalog-grounded recommendations'},{status:502});
+    const clean:any={styleSummary:String(parsed.styleSummary??'').slice(0,500),recommendations,outfit:parsed.outfit??{topVariantId:null,bottomVariantId:null,dressVariantId:null,accessoryVariantIds:[],justification:''},beautyRoutine:parsed.beautyRoutine??{products:[],hairProducts:[]}};
+    const valid=(id:any)=>id==null||allowed.has(id); if(!valid(clean.outfit.topVariantId)||!valid(clean.outfit.bottomVariantId)||!valid(clean.outfit.dressVariantId))clean.outfit={topVariantId:null,bottomVariantId:null,dressVariantId:null,accessoryVariantIds:[],justification:''};
+    clean.outfit.accessoryVariantIds=Array.isArray(clean.outfit.accessoryVariantIds)?clean.outfit.accessoryVariantIds.filter(valid).slice(0,6):[];
+    clean.beautyRoutine.products=Array.isArray(clean.beautyRoutine.products)?clean.beautyRoutine.products.filter((x:any)=>valid(x.variantId)).slice(0,8):[];
+    clean.beautyRoutine.hairProducts=Array.isArray(clean.beautyRoutine.hairProducts)?clean.beautyRoutine.hairProducts.filter((x:any)=>valid(x.variantId)).slice(0,6):[];
+    let appUserId:null|string=null; if(authUserId){appUserId=(await db.from('users').select('id').eq('auth_id',authUserId).single()).data?.id??null;} await db.from('ai_recommendation_logs').insert({user_id:appUserId,input_snapshot:answers,recommended_variant_ids:recommendations.map((r:any)=>r.variantId)});
+    return NextResponse.json(clean);
+  }catch(e:any){return NextResponse.json({error:'Style Assistant failed'},{status:500});}
+}
