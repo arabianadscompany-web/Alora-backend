@@ -1,0 +1,3 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { getAdminClient, requireAuth } from '@/lib/auth/server';
+export async function POST(req:NextRequest){try{const u=await requireAuth(req);const b=await req.json().catch(()=>({}));const db=getAdminClient();const {data,error}=await db.from('users').upsert({auth_id:u.id,name:String(b.name??u.user_metadata?.full_name??u.email?.split('@')[0]??'Customer').slice(0,160),email:u.email!,phone:b.phone??u.phone??null},{onConflict:'auth_id'}).select('id,name,email,phone,role').single();if(error)throw error;return NextResponse.json({user:data});}catch(e:any){const s=e?.message==='UNAUTHENTICATED'?401:500;return NextResponse.json({error:s===500?'Could not sync account':e.message},{status:s});}}
